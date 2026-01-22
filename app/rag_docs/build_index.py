@@ -1,4 +1,4 @@
-from rag_docs.loader import load_docs, split_docs
+from app.rag_docs.loader import load_docs, split_docs
 from app.deps import get_vs
 
 def main():
