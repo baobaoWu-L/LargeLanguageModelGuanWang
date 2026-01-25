@@ -1,7 +1,8 @@
 from langchain_community.chat_models import ChatTongyi
 from langchain_community.embeddings import DashScopeEmbeddings
 from app.config import settings
-from app.db.vectorstore import get_vectorstore
+from app.db.vectorstore import get_vectorstore, get_audio_vectorstore
+
 
 def get_llm():  # 配置一个大语言模型，此处用的是deepseek
     return ChatTongyi(
@@ -18,6 +19,9 @@ def get_embeddings():  # 此处配置的是千问的嵌入式模型
     )
 def get_vs():
     return get_vectorstore(get_embeddings())
+
+def get_audio_vs():
+    return get_audio_vectorstore(get_embeddings())
 
 
 if __name__ == "__main__":

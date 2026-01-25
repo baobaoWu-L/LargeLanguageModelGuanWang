@@ -14,6 +14,7 @@ class Settings(BaseModel):  # BaseModel后续这个类会转换为JSON/字典方
     collection_name: str = os.getenv("COLLECTION_NAME", "knowledge_base")
     chunk_size: int = int(os.getenv("CHUNK_SIZE", "800"))
     chunk_overlap: int = int(os.getenv("CHUNK_OVERLAP", "120"))
+    audio_collection_name: str = os.getenv("AUDIO_COLLECTION_NAME", "audio_base")
 
 
 settings = Settings()

@@ -25,6 +25,8 @@ from app.db.rbac import get_user_roles,get_user_permissions
 from app.rbac.perm import require_permission, check_permission
 from app.api.kb_api import router as kb_router
 from app.api.auth import router as auth_router
+from app.api.audio_api import router as audio_router
+
 
 SESSIONS: dict[str, dict] = {}  # # ⚠️加这一行
 
@@ -32,6 +34,8 @@ app = FastAPI(title="Enterprise KB Assistant")
 app.include_router(auth_router)
 app.include_router(rbac_router)
 app.include_router(kb_router)
+app.include_router(audio_router)
+
 
 DATA_DOCS_DIR = Path("./data/docs")
 DATA_DOCS_DIR.mkdir(parents=True, exist_ok=True)
