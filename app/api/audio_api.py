@@ -18,10 +18,16 @@ from app.model.audio_model import AudioIngestResp, AudioDocDetail, AudioSearchRe
 from app.deps import get_audio_vs
 from langchain_core.documents import Document
 
+from fastapi import BackgroundTasks
+from fastapi.responses import FileResponse
+from app.audio.clip import clip_audio_to_mp3
+
+
 router = APIRouter(prefix="/audio", tags=["audio"])
 
 AUDIO_DIR = Path("data_audio/audio")  # 找阿里云，amazon做对象存储
 AUDIO_WAV_DIR = Path("data_audio/audio_wav")
+CLIP_DIR = Path("data_audiomp3/audio_clips")
 
 
 @router.post("/ingest", response_model=AudioIngestResp)
@@ -149,3 +155,86 @@ def search_audio(
         )
 
     return AudioSearchResp(q=q, k=k, allowed_visibilities=allowed, hits=hits)
+
+@router.get("/{audio_id}/clip")
+def get_audio_clip(
+    audio_id: str,
+    background_tasks: BackgroundTasks,
+    start_ms: Optional[int] = Query(default=None, ge=0),
+    end_ms: Optional[int] = Query(default=None, ge=0),
+    segment_id: Optional[str] = Query(default=None),  # e.g. aud-xxxx:3
+    current_user: UserInDB = Depends(get_current_user),
+):
+    """
+    返回裁剪后的mp3片段，优先segment_id（从DB取 start/end），否则必须提供 start_ms + end_ms
+    """
+    # 1) 读取 audio doc
+    row = audio_db.get_audio_document(audio_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="audio not found")
+
+    # 2) 可见性校验：audio_documents.visibility 必须在allowed中
+    # allowed = compute_allowed_kb_visibilities(current_user)
+    # doc_vis = (row.get("visibility") or "").strip().lower()
+    # if doc_vis not in set(allowed):
+    #     raise HTTPException(status_code=403, detail="no permission to access this audio")
+
+    # 3) 确定裁剪区间
+    if segment_id:
+        if ":" not in segment_id:
+            raise HTTPException(status_code=400, detail="invalid segment_id format")
+        seg_audio_id, seg_idx_str = segment_id.split(":", 1)
+        if seg_audio_id != audio_id:
+            raise HTTPException(status_code=400, detail="segment_id does not match audio_id")
+        try:
+            seg_idx = int(seg_idx_str)
+        except ValueError:
+            raise HTTPException(status_code=400, detail="invalid segment_idx in segment_id")
+
+        seg = audio_db.get_audio_segment(audio_id, seg_idx)
+        if not seg:
+            raise HTTPException(status_code=404, detail="segment not found")
+
+        start_ms = int(seg["start_ms"])
+        end_ms = int(seg["end_ms"])
+    else:  # 如果没有提供segment_id就必须提供开始和结束时间，可以剪辑任意范围内的音频，如果都没提供出异常
+        if start_ms is None or end_ms is None:
+            raise HTTPException(status_code=400, detail="start_ms and end_ms are required when segment_id is not provided")
+
+    # 4) 合法性限制（防止一次裁太长）
+    if end_ms <= start_ms:
+        raise HTTPException(status_code=400, detail="end_ms must be greater than start_ms")
+    max_clip_ms = 5 * 60 * 1000  # 5 分钟上限（你可以改）
+    if (end_ms - start_ms) > max_clip_ms:
+        raise HTTPException(status_code=400, detail="clip too long")
+
+    src_path = Path(row["stored_path"])
+    if not src_path.exists():
+        raise HTTPException(status_code=404, detail="stored audio file missing")
+
+    # 6) 生成 clip 文件
+    CLIP_DIR.mkdir(parents=True, exist_ok=True)
+    clip_name = f"{audio_id}_{start_ms}_{end_ms}_{uuid.uuid4().hex[:8]}.mp3"
+    clip_path = CLIP_DIR / clip_name
+
+    print(f"Clip Path: {clip_path}")
+    print(f"Loading audio from {src_path}")
+
+    try:
+        clip_audio_to_mp3(
+            src_path=src_path,
+            dst_path=clip_path,
+            start_ms=int(start_ms),
+            end_ms=int(end_ms),
+        )
+    except Exception:
+        raise HTTPException(status_code=500, detail="failed to generate clip")
+
+    # 7) 返回并后台删除临时文件
+    background_tasks.add_task(lambda p=str(clip_path): Path(p).unlink(missing_ok=True))
+
+    return FileResponse(
+        path=str(clip_path),
+        media_type="audio/mpeg",
+        filename=clip_name,
+    )

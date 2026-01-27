@@ -34,7 +34,7 @@ class ASR:
 
         return segs, lang
 if __name__ == "__main__":
-    segs, lang = ASR().transcribe("/app/chushibiao.wav", language="zh")
+    segs, lang = ASR().transcribe("/home/lovebreaker/LargeLanguageModel/app/chushibiao.wav", language="zh")
 
     print('这段音频中说的语言是:', lang)
     for s in segs:
