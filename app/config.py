@@ -16,5 +16,12 @@ class Settings(BaseModel):  # BaseModel后续这个类会转换为JSON/字典方
     chunk_overlap: int = int(os.getenv("CHUNK_OVERLAP", "120"))
     audio_collection_name: str = os.getenv("AUDIO_COLLECTION_NAME", "audio_base")
 
+    celery_broker_url: str = os.getenv("CELERY_BROKER_URL", "amqp://LoveBreaker:123456@127.0.0.1:5672/%2F")  # ⚠️改自己的用户名和密码
+    celery_audio_queue: str = "audio"  # 消息队列的名字
+
+    audio_dir: str = "data/audio"
+    audio_wav_dir: str = "data/audio_wav"
+    audio_clip_dir: str = "data_audiomp3/audio_clips"
+
 
 settings = Settings()

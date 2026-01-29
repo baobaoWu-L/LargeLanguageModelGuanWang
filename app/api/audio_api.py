@@ -9,7 +9,7 @@ from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Upload
 
 from app.api.auth import UserInDB, get_current_user
 from app.rbac.perm import check_permission
-from app.rag_docs.audio_loader import ffprobe_duration_ms, transcode_to_wav_16k_mono
+from app.rag_audio.audio_loader import ffprobe_duration_ms, transcode_to_wav_16k_mono
 from app.audio.asr import ASR
 from app.audio.segmenter import merge_by_max_duration
 from app.db import audio_db

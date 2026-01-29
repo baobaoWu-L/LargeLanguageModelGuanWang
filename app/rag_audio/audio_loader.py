@@ -37,5 +37,5 @@ def transcode_to_wav_16k_mono(src: Path, dst: Path) -> None:
     subprocess.check_call(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 if __name__=='__main__':
-    print(ffprobe_duration_ms(Path('/home/lovebreaker/LargeLanguageModel/app/chushibiao.MP3')))
-    transcode_to_wav_16k_mono(Path('/home/lovebreaker/LargeLanguageModel/app/chushibiao.MP3'), Path('/home/lovebreaker/LargeLanguageModel/app/chushibiao.wav'))
+    print(ffprobe_duration_ms(Path('/app/chushibiao.MP3')))
+    transcode_to_wav_16k_mono(Path('/app/chushibiao.MP3'), Path('/app/chushibiao.wav'))

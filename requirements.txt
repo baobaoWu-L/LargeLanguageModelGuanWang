@@ -47,3 +47,11 @@ huggingface-hub
 transformers
 langchain-chroma
 langchain-core
+
+celery==5.6.2
+amqp==5.3.1
+
+webrtcvad==2.0.10
+elasticsearch==9.2.1
+transformers>=4.40.0
+torch>=2.1.0
