@@ -26,7 +26,7 @@ from app.rbac.perm import require_permission, check_permission
 from app.api.kb_api import router as kb_router
 from app.api.auth import router as auth_router
 from app.api.audio_api import router as audio_router
-
+from app.api.audio_admin_api import router as audio_admin_router
 
 SESSIONS: dict[str, dict] = {}  # # ⚠️加这一行
 
@@ -35,6 +35,7 @@ app.include_router(auth_router)
 app.include_router(rbac_router)
 app.include_router(kb_router)
 app.include_router(audio_router)
+app.include_router(audio_admin_router)
 
 
 DATA_DOCS_DIR = Path("./data/docs")
