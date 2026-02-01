@@ -8,7 +8,7 @@ def get_llm():  # 配置一个大语言模型，此处用的是deepseek
     return ChatTongyi(
         model=settings.model_name,
         api_key=settings.qianwen_api_key,
-        temperature=0.2,
+        model_kwargs={"temperature": 0.2},
         streaming=True,
     )
 

@@ -333,9 +333,10 @@ def root():
 # echo $TOKEN
 
 
-# ADMIN_TOKEN =$(curl - s - X POST http: // 127.0.0.1:8002 / auth / login \
-#     -H 'Content-Type: application/json' \
-#     -d '{"username":"admin","password":"123456"}' | jq -r.access_token)
+# ADMIN_TOKEN=$(curl -s -X POST http://127.0.0.1:8002/auth/login \
+#   -H 'Content-Type: application/json' \
+#   -d '{"username":"admin","password":"123456"}' | jq -r .access_token)
+#
 # echo $ADMIN_TOKEN
 
 #
