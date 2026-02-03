@@ -146,18 +146,11 @@ def upsert_audio_document(
             cur.execute(
                 sql,
                 (
-                    audio_id,
-                    original_filename,
-                    stored_path,
-                    int(duration_ms),
-                    language,
-                    visibility,
-                    status,
-                    uploader_user_id,
-                    uploader_username,
-                    int(segment_count),
+                    audio_id, original_filename, stored_path, int(duration_ms), language,
+                    visibility, status, uploader_user_id, uploader_username, int(segment_count)
                 ),
             )
+
 
 
 def update_audio_status(audio_id: str, status: str) -> None:
@@ -214,7 +207,7 @@ def delete_audio_segments(audio_id: str) -> int:
             return int(cur.rowcount or 0)
 
 
-def get_audio_segment(audio_id: str, segment_idx: int) -> Optional[dict[str, Any]]:
+def get_audio_segment(audio_id: str, segment_idx: int):
     with get_conn() as conn:
         with conn.cursor() as cur:
             cur.execute(

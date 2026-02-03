@@ -2,36 +2,169 @@ from __future__ import annotations
 
 import time, uuid
 from pathlib import Path
-from typing import List, Optional
+from typing import List, Optional, Iterable
 import httpx
 from fastapi import HTTPException
 from dashscope import Generation
 from fastapi import (APIRouter, BackgroundTasks, Depends, File, Form, HTTPException, Query, Request, UploadFile,)
 from fastapi.responses import FileResponse
+from langchain_core.messages import SystemMessage, HumanMessage
+from starlette.responses import StreamingResponse
 
 from app.api.auth import UserInDB, get_current_user
 from app.audio.clip import clip_audio_to_mp3
 from app.config import settings
 from app.db import audio_db, audio_job_db
-from app.deps import get_audio_vs
+from app.deps import get_audio_vs, get_llm
 from app.model.audio_model import AudioIngestAsyncResp, AudioJobResp, AudioDocDetail, AudioSearchResp, AudioSearchHit, \
     AudioCitation, AudioAskResp, AudioAskReq
 from app.rbac.perm import allowed_kb_visibilities, check_permission
 from app.audio.audio_tasks import audio_ingest_task
+from app.deps import get_llm
 
 
 router = APIRouter(prefix="/audio", tags=["audio"])
-
 AUDIO_DIR = Path(getattr(settings, "audio_dir", "data/audio"))
 CLIP_DIR = Path(getattr(settings, "audio_clip_dir", "data/audio_clips"))
+
+def _normalize_visibility(v: str) -> str:
+    v = (v or "").strip().lower()
+    return v if v in ("public", "internal") else "public"
+
+
+def _get_allowed_and_check(user: UserInDB, doc_visibility: Optional[str] = None) -> List[str]:
+    perms = getattr(user, "permissions", None)
+    allowed = allowed_kb_visibilities(perms)
+    if "public" not in allowed:
+        allowed = ["public"] + [x for x in allowed if x != "public"]
+
+    if doc_visibility:
+        vis = (doc_visibility or "").strip().lower()
+        if vis not in set(allowed):
+            raise HTTPException(status_code=403, detail="no permission to access this audio")
+
+    return allowed
+
+
+def _get_allowed_set(user: UserInDB) -> set[str]:
+    return set(_get_allowed_and_check(user))
+
+
+def _absolute_base(request: Request) -> str:
+    return str(request.base_url).rstrip("/")
+
+def _build_langchain_messages(messages: list[dict[str, str]]):
+    """
+    将我们自己构造的message转换成langchain能识别的消息对象列表，是一个小的工具类
+    这里的message本意是这样的
+    [
+        {"role": "system", "content": "你是一个音频问答助手。"},
+        {"role": "user", "content": "请根据音频内容回答问题。"}
+    ]
+    """
+    msg_objs = []
+    for m in messages:
+        role = m.get("role", "")
+        content = m.get("content", "")
+        if not content:
+            continue
+        msg_objs.append(
+            SystemMessage(content=content) if role == "system" else HumanMessage(content=content)
+        )
+    return msg_objs
+
+def _search_audio_segments(vs, query: str, allowed_vis: list[str], k: int, audio_id: Optional[str] = None):
+    where = {"visibility": {"$in": allowed_vis}}
+    if audio_id:
+        where = {"$and": [{"visibility": {"$in": allowed_vis}}, {"audio_id": audio_id}]}
+    fetch_k = min(max(k * 5, k), 50)
+    return vs.similarity_search_with_score(query, k=fetch_k, filter=where)
+
+
+def _build_audio_hits(docs_scores, allowed_vis_set: set[str], base: str, mode: str = "hit"):
+    """把向量搜索结果docs_scores转换成业务层能用的结构AudioSearchHit或AudioCitation"""
+    results, seen = [], set()  # seen用于防止重复片段，比如多个检索结果指向相同音频区间
+    for doc, score in docs_scores:
+        md = doc.metadata or {}
+        audio_id = str(md.get("audio_id") or "").strip()
+        segment_id = str(md.get("segment_id") or "").strip()
+        if not (audio_id and segment_id):
+            continue
+        try:
+            start_ms, end_ms = int(md.get("start_ms", 0)), int(md.get("end_ms", 0))
+        except Exception:
+            continue
+        if start_ms < 0 or end_ms <= start_ms:
+            continue
+        key = (audio_id, segment_id, start_ms, end_ms)
+        if key in seen:
+            continue
+        seen.add(key)  # 生成唯一key，即同一个片段唯一标识，所以这里用了set集合
+        db_doc = audio_db.get_audio_document(audio_id)
+        if not db_doc:
+            continue
+        if (db_doc.get("visibility") or "").strip().lower() not in allowed_vis_set:
+            continue
+        text = (doc.page_content or "").strip()
+        if mode == "hit":  # hit搜索结果列表/query，返回AudioSearchHit
+            results.append(AudioSearchHit(
+                audio_id=audio_id, segment_id=segment_id,
+                start_ms=start_ms, end_ms=end_ms, text=text,
+                score=float(score) if score is not None else None,
+                clip_url=_clip_url(base, audio_id, start_ms, end_ms)
+            ))
+        else: # citation问答引用/ask/stream接口，结果是AudioCitation
+            results.append(AudioCitation(
+                audio_id=audio_id, segment_id=segment_id,
+                start_ms=start_ms, end_ms=end_ms, text=text,
+                clip_url=_clip_url(base, audio_id, start_ms, end_ms),
+                score=float(score) if score is not None else None
+            ))
+    return results
+
+
+def _openai_stream(*, messages: list[dict[str, str]]) -> Iterable[str]:
+    """参数和之前的一样，返回值是Iterable[str]，主要我们后面用yield流式输出做好基础"""
+    llm = get_llm()
+    try:
+        for chunk in llm.stream(_build_langchain_messages(messages)):
+            if chunk.content:
+                yield chunk.content
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"LLM 流式调用出错: {e}")
+
+
+def _build_rag_messages(question: str, citations: list[AudioCitation], system_prompt: Optional[str]) -> list[
+    dict[str, str]]:
+    sys = (system_prompt or "").strip() or (
+        "你是企业知识库助手，回答必须基于给定的【音频片段】内容。"
+        "如果片段不足以回答，就明确说“不确定/片段中没有”。"
+        "回答要简洁，并在结尾给出引用列表（用 [1][2]... 标注）。"
+    )
+
+    ctx_lines = [
+        f"[{i}] audio_id={c.audio_id} segment_id={c.segment_id} "
+        f"start_ms={c.start_ms} end_ms={c.end_ms}\n片段文本：{c.text}"
+        for i, c in enumerate(citations, start=1)
+    ]
+    ctx = "\n\n".join(ctx_lines) if ctx_lines else "（无片段）"
+
+    user = (
+        f"问题：{question}\n\n"
+        f"【音频片段】\n{ctx}\n\n"
+        "要求：\n1) 只用片段信息回答。\n"
+        "2) 如果引用了某个片段，请用 [序号] 标注。\n"
+        "3) 不要编造片段里没有的信息。"
+    )
+
+    return [{"role": "system", "content": sys}, {"role": "user", "content": user}]
+
 
 def _clip_url(base: str, audio_id: str, start_ms: int, end_ms: int) -> str:
     return f"{base}/audio/docs/{audio_id}/clip?start_ms={start_ms}&end_ms={end_ms}"
 
 
 def _openai_chat_complete(*, model: str, api_key: str, messages: list[dict[str, str]], timeout_s: float = 60.0) -> str:
-
-
     # url = "https://api.openai.com/v1/chat/completions"
     # headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
     # payload = {
@@ -49,13 +182,13 @@ def _openai_chat_complete(*, model: str, api_key: str, messages: list[dict[str, 
     # except Exception:
     #     raise HTTPException(status_code=500, detail="OpenAI response parse error")
 
-    # llm = get_llm()  # 获取通义千问的LLM实例
+    llm = get_llm()  # 获取通义千问的LLM实例
     s = settings
     # 构建调用参数（与 Generation.call 参数对齐）
     payload = {
         "model": s.model_name,
         "messages": messages,
-        # "temperature": llm.temperature,
+        "model_kwargs": llm.model_kwargs
     }
 
     try:
@@ -87,48 +220,8 @@ def _openai_chat_complete(*, model: str, api_key: str, messages: list[dict[str, 
             detail=f"Qwen API error: {str(e)}"
         )
 
-
-def _build_rag_messages(question: str, citations: list[AudioCitation], system_prompt: Optional[str]) -> list[dict[str, str]]:
-    sys = (system_prompt or "").strip() or (
-        "你是企业知识库助手，回答必须基于给定的【音频片段】内容。"
-        "如果片段不足以回答，就明确说“不确定/片段中没有”。"
-        "return中的'text'所有文字请使用中文简体回答"
-        "回答要简洁，并在结尾给出引用列表（用 [1][2]... 标注）。"
-    )
-
-    ctx_lines: list[str] = []
-    for i, c in enumerate(citations, start=1):
-        ctx_lines.append(
-            f"[{i}] audio_id={c.audio_id} segment_id={c.segment_id} "
-            f"start_ms={c.start_ms} end_ms={c.end_ms}\n"
-            f"片段文本：{c.text}"
-        )
-    ctx = "\n\n".join(ctx_lines) if ctx_lines else "（无片段）"
-
-    user = (
-        f"问题：{question}\n\n"
-        f"【音频片段】\n{ctx}\n\n"
-        "要求：\n"
-        "1) 只用片段信息回答。\n"
-        "2) 如果引用了某个片段，请用 [序号] 标注。\n"
-        "3) 不要编造片段里没有的信息。"
-    )
-
-    return [
-        {"role": "system", "content": sys},
-        {"role": "user", "content": user},
-    ]
-
-
 def _require_manage_docs(user: UserInDB) -> None:
     check_permission(user, "kb.manage_docs")
-
-
-def _normalize_visibility(v: str) -> str:
-    v = (v or "").strip().lower()
-    if v in ("public", "internal"):
-        return v
-    return "public"
 
 
 def _compute_allowed_visibilities(user: UserInDB) -> List[str]:
@@ -145,12 +238,6 @@ def _ensure_can_access_visibility(user: UserInDB, doc_visibility: str) -> List[s
     if vis not in set(allowed):
         raise HTTPException(status_code=403, detail="no permission to access this audio")
     return allowed
-
-
-def _absolute_base(request: Request) -> str:
-    return str(request.base_url).rstrip("/")
-
-
 
 @router.post("/ingest", response_model=AudioIngestAsyncResp)
 async def ingest_audio(
@@ -479,7 +566,7 @@ def ask_audio(
         return AudioAskResp(question=question, answer="没有检索到相关音频片段。", citations=[])
 
     api_key = getattr(settings, "qianwen_api_key", "") or ""
-    model = getattr(settings, "model_name", "") or "gpt-4o-mini"
+    model = getattr(settings, "model_name", "") or "qwen-plus"
 
     if not api_key:
         return AudioAskResp(
@@ -493,3 +580,35 @@ def ask_audio(
     answer = _openai_chat_complete(model=model, api_key=api_key, messages=messages, timeout_s=90.0)
 
     return AudioAskResp(question=question, answer=answer, citations=citations)
+
+@router.post("/ask/stream")
+def ask_audio_stream(
+    req: dict,
+    request: Request,
+    current_user: UserInDB = Depends(get_current_user),
+):
+    question = (req.get("question") or "").strip()
+    audio_id = req.get("audio_id")
+    k = max(1, min(int(req.get("k") or 6), 20))
+
+    if not question:
+        raise HTTPException(status_code=400, detail="question is empty")
+
+    allowed_vis = _get_allowed_and_check(current_user)
+    allowed_vis_set = set(allowed_vis)
+    vs = get_audio_vs()
+    base = _absolute_base(request)
+
+    docs_scores = _search_audio_segments(vs, question, allowed_vis, k, audio_id)
+    citations = _build_audio_hits(docs_scores, allowed_vis_set, base, mode="citation")
+
+    messages = _build_rag_messages(question, citations, None)
+
+    def event_stream():
+        yield f"event: meta\ndata: { {'question': question, 'citations': [c.model_dump() for c in citations]} }\n\n"
+        for chunk in _openai_stream(messages=messages):
+            yield f"event: token\ndata: {chunk}\n\n"
+        yield "event: done\ndata: [DONE]\n\n"
+
+    return StreamingResponse(event_stream(), media_type="text/event-stream")
+
